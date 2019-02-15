@@ -1,0 +1,13 @@
+Hola
+me 
+<<<<<<< HEAD
+llamo
+carlos
+cambio esto
+=======
+llaman
+jose manuel
+xsdd
+>>>>>>> fix-prueba
+jaja saludos
+y ahora
