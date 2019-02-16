@@ -1,10 +1,8 @@
-Hola
-me 
-llamo
-carlos
-aa
-bb
-cc
-cambio esto
-jaja saludos
-y ahora
+codigo bueno
+codigo bueno
+codigo bueno
+codigo comun
+codigo malo
+codigo comun
+codigo comun 
+codigo malo
