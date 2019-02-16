@@ -6,3 +6,6 @@ codigo malo
 codigo comun
 codigo comun 
 codigo malo
+cogo peor
+codigo bueno
+codigo malo
