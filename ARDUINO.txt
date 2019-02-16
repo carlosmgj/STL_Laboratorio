@@ -1,0 +1,772 @@
+
+     /**@file 
+     * @mainpage Main Page 
+     *
+     * @section intro_sec Introduction
+     *
+     * This is the documentation for Mini Low cost for the
+     * Arduino platform. 
+     *
+     *It includes the control of the Mouth, cheeks and heart LEDs through Rosserial
+     * communication using certain messages. Besides, it notice to the CPU whenever any sensor channel 
+     * is pressed and released.
+     *
+     *
+     * @section dependencies Dependencies
+     *
+     * This library depends on ros message libraries. Please make sure you have
+     * generated the latest version before using this library.This can be done with the 
+     * following commands:
+     * - Clone the packages with the msg needed:
+     *    -# arduino_manager https://asimov.uc3m.es/devices/arduino_manager.git
+     *    -# leds_msgs: https://asimov.uc3m.es/msgs/leds_msgs.git
+     * - Run catkin_make
+     * - Generate arduino libraries: 
+     * rosrun rosserial_arduino make_libraries .../sketchbook/libraries
+     *
+     * @section author Author
+     *
+     * Written by Carlos Manuel Gomez Jimenez for the Social Robots Group at Robotics Lab, UC3M (Spain).
+     *
+     * @section license License
+     *
+     * BSD license, all text here must be included in any redistribution.
+     *
+     */
+#include <Adafruit_NeoPixel.h>
+#include <avr/power.h>
+#include "mpr121.h"
+#include <Wire.h>
+#include <SPI.h>
+#include <ros.h>
+#include <arduino_manager/sensorTouch.h>
+#include <leds_msgs/leds_cmd.h>
+#include <leds_msgs/leds_commands.h> 
+#include <std_msgs/UInt8.h>
+#include <std_msgs/Empty.h>
+
+
+#define NUMERO_CANALES               12                                                                                ///<  How many different touch pads can be used.
+#define LEDS_HEART                   7                                                                                 ///<  Number of leds in NEOPIXEL JEWEL.
+#define LEDS_CHEEKS                  2                                                                                 ///<  Number of leds in CHEEKS.
+#define LED_VUMETER_COUNT            8                                                                                 ///<  Number of leds in MOUTH.
+#define HEART_LED_PIN                2                                                                                 ///<  Physical pin/port in the arduino connected to HEART.
+#define CHEEKS_LED_PIN               4                                                                                 ///<  Physical pin/port in the arduino connected to CHEEKS.
+#define MOUTHPIN                     5                                                                                 ///<  Physical pin/port in the arduino connected to MOUTH.
+#define LED_POSITION_LEFT            0                                                                                 ///<  Position indicating how the left cheek is connected, it's the first one.
+#define LED_POSITION_RIGHT           1                                                                                 ///<  Position indicating how the right cheek is connected, it's the second one.
+#define MIN_INTENSITY_CONS_MIN       0                                                                                 ///<  Minimum possible value for the Min intensity, used in constrain.
+#define MIN_INTENSITY_CONS_MAX       30                                                                                ///<  Maximum possible value for the Min intensity, used in constrain.
+#define MAX_INTENSITY_CONS_MIN       50                                                                                ///<  Minimum possible value for the Max intensity, used in constrain.
+#define MAX_INTENSITY_CONS_MAX       100                                                                               ///<  Maximum possible value for the Max intensity, used in constrain.
+#define MIN_FADE_VELOCITY            0                                                                                 ///<  Minimum possible value for the fade velocity, used in constrain.
+#define MAX_FADE_VELOCITY            100                                                                               ///<  Maximum possible value for the fade velocity, used in constrain.
+#define MIN_INTENSITY_MAPPED_MIN     0                                                                                 ///<  NO DEBERIA HABER SOLO DOS VALORES, 0-255?
+#define MIN_INTENSITY_MAPPED_MAX     255/3                                                                             ///<  NO DEBERIA HABER SOLO DOS VALORES, 0-255?
+#define MAX_INTENSITY_MAPPED_MIN     255/2                                                                             ///<  NO DEBERIA HABER SOLO DOS VALORES, 0-255?
+#define MAX_INTENSITY_MAPPED_MAX     255                                                                               ///<  NO DEBERIA HABER SOLO DOS VALORES, 0-255?
+#define LUMMAX                       200                                                                               ///<  
+#define DIVIDER                      3                                                                                 ///<
+#define LEDDERCENTRO                 4                                                                                 ///<
+#define LEDDERINTERIOR               5                                                                                 ///<
+#define LEDDEREXTERIOR               6                                                                                 ///<
+#define LEDDEREXTREMO                7                                                                                 ///<
+#define LEDIZQCENTRO                 3                                                                                 ///<
+#define LEDIZQINTERIOR               2                                                                                 ///<
+#define LEDIZQEXTERIOR               1                                                                                 ///<
+#define LEDIZQEXTREMO                0                                                                                 ///<
+
+
+Adafruit_NeoPixel heartLED                  = Adafruit_NeoPixel(LEDS_HEART, HEART_LED_PIN, NEO_GRB + NEO_KHZ800);      ///<  Instance of NEOPIXEL for the HEART. @param FIRST How many LEDS connected there are @param SECOND In which pin*/
+Adafruit_NeoPixel cheeksLED                 = Adafruit_NeoPixel(LEDS_CHEEKS,CHEEKS_LED_PIN, NEO_GRB + NEO_KHZ800);     ///<  Instance of NEOPIXEL for the CHEEKS. @param FIRST How many LEDS connected there are @param SECOND In which pin*/
+Adafruit_NeoPixel mouth                     = Adafruit_NeoPixel(LED_VUMETER_COUNT, MOUTHPIN, NEO_GRB + NEO_KHZ800);    ///<  Instance of NEOPIXEL for the MOUTH. @param FIRST How many LEDS connected there are @param SECOND In which pin*/
+
+// Global variables
+
+ros::NodeHandle_<ArduinoHardware, 2, 1, 90, 105> nh;                                                                   ///<  Set node handle.Additional settings for changing buffer sizes. The numbers mean the following: MAX PUB, MAX SUBS, INPUT SIZE, OUTPUT SIZE
+leds_msgs::leds_cmd cmd;                                                                                               ///<  Instance of message of type leds_msgs/leds_cmd.                                                                 
+int fade_velocity_divider                   = 5;                                                                       ///<  (QUITAR SEGURAMENTE) Usado para dividir la velocidad de fade. 
+uint8_t led_position                        = 0;                                                                       ///<  Used to go over several LEDs and indicate the current number. 
+// Variables for heart
+String led_id                               = "";                                                                      ///<  It stores the id string coming over the message
+String color_std                            = "";                                                                      ///<  It stores the color string coming over the message 
+uint8_t heart_R                             = 255;                                                                     ///<  Value for red light in HEART
+uint8_t heart_G                             = 0;                                                                       ///<  Value for green light in HEART
+uint8_t heart_B                             = 0;                                                                       ///<  Value for blue light in HEART
+bool heart_fade                             = true;                                                                    ///<  If TRUE, the HEART will change its value gradually in a fading movement.
+int heart_fade_velocity                     = 50;                                                                      ///<  (QUITAR SEGURAMENTE) 
+float heart_delay                           = 0;                                                                       ///<  (QUITAR SEGURAMENTE) 
+uint8_t heart_min_intensity                 = 0;                                                                       ///<  Its range varies from 0 to 255
+uint8_t heart_max_intensity                 = 255;                                                                     ///<  Its range varies from 0 to 255
+uint8_t heartintensity_step                 = 2;                                                                       ///<  Value of the step when fading 
+int heart_intensity_now                     = 0;                                                                       ///<  MIRAR LO QUE HACE 
+bool fadeup                                 = true;                                                                    ///<  Flag for pointing if the HEART is fading up or fading down.
+bool fadedown                               = false;                                                                   ///<  Flag for pointing if the HEART is fading up or fading down. ¿NECESSARY???
+long previousMillis                         = 0;                                                                       ///<  Variable used by the timer.
+long interval                               = 10;                                                                      ///<  Minimum time in millisecond between the call of each showheart function.
+// Variables for cheeks
+uint8_t cheeks_R                            = 0;                                                                       ///<  Value for red light in CHEEKS
+uint8_t cheeks_G                            = 0;                                                                       ///<  Value for green light in CHEEKS
+uint8_t cheeks_B                            = 0;                                                                       ///<  Value for blue light in CHEEKS
+uint8_t last_cheeks_R                       = 0;                                                                       ///<  Last Value for red light in CHEEKS while fading is TRUE.
+uint8_t last_cheeks_G                       = 0;                                                                       ///<  Last Value for green light in CHEEKS while fading is TRUE.
+uint8_t last_cheeks_B                       = 0;                                                                       ///<  Last Value for blue light in CHEEKS while fading is TRUE.
+uint8_t cheeks_min_intensity                = 0;                                                                       ///<  Its range varies from 0 to 255
+uint8_t cheeks_max_intensity                = 255;                                                                     ///<  Its range varies from 0 to 255
+uint8_t cheeksintensity_step                = 1;                                                                       ///<  MIRAR LO QUE HACE 
+bool cheeksfade                             = false;                                                                   ///<  If TRUE, the CHEEKS will change its value gradually in a fading movement.
+bool cheeks_fade_up                         = false;                                                                   ///<  Flag for pointing if the CHEEKS are fading up or fading down.
+bool cheeks_fade_down                       = false;                                                                   ///<  Flag for pointing if the CHEEKS are fading up or fading down.
+uint8_t cheeks_fade_velocity                = 50;                                                                      ///<  (QUITAR SEGURAMENTE) 
+bool cheeks_stop                            = true;                                                                    ///<  MIRAR LO QUE HACE 
+uint8_t cheeks_intensity_now                = 0;                                                                       ///<  MIRAR LO QUE HACE 
+//Variables for mouth
+uint8_t mouth_r                             = 0;                                                                       ///<  Value for red light in MOUTH
+uint8_t mouth_g                             = 0;                                                                       ///<  Value for green light in MOUTH
+uint8_t mouth_b                             = 125;                                                                     ///<  Value for blue light in MOUTH
+int valormapeado;                                                                                                      ///<
+//Variables for touch sensor
+int irqpin = 3;                                                                                                        ///<  Pin attached to the interrupt pin of the MPR121 
+boolean touchStates[12];                                                                                               ///<  To keep track of the previous touch states
+
+
+/**************************************************************************/
+/*!
+    @brief    CONFIGURATION OF CHEEKS LEDS
+    @param    r
+              Red light value.
+    @param    g
+              Red light value.
+    @param    b
+              Red light value.
+    @param    min_intensity
+              Minimum intensity the CHEEKS can achieve.
+    @param    max_intensity
+              Maximum intensity the CHEEKS can achieve.
+    @param    fade
+              If true, the CHEEKS will change its value gradually. 
+    @param    fade_velocity
+              Change rate for the fade.              
+    @return   None.
+*/
+/**************************************************************************/
+void setCheeks(uint8_t r, uint8_t g, uint8_t b, uint8_t min_intensity, uint8_t max_intensity, bool fade, uint8_t fade_velocity)
+{ 
+  cheeks_R = r;
+  cheeks_G = g;
+  cheeks_B = b;
+  cheeks_min_intensity = min_intensity;
+  cheeks_min_intensity = constrain(cheeks_min_intensity,MIN_INTENSITY_CONS_MIN,MIN_INTENSITY_CONS_MAX);
+  cheeks_min_intensity = map(cheeks_min_intensity,MIN_INTENSITY_CONS_MIN,MIN_INTENSITY_CONS_MAX,MIN_INTENSITY_MAPPED_MIN,MIN_INTENSITY_MAPPED_MAX);
+  cheeks_max_intensity = max_intensity;
+  cheeks_max_intensity = constrain(cheeks_max_intensity,MAX_INTENSITY_CONS_MIN,MAX_INTENSITY_CONS_MAX);
+  cheeks_max_intensity = map(cheeks_max_intensity,MAX_INTENSITY_CONS_MIN,MAX_INTENSITY_CONS_MAX,MAX_INTENSITY_MAPPED_MIN,MAX_INTENSITY_MAPPED_MAX);
+  cheeksfade = fade;
+  cheeks_fade_velocity = fade_velocity;
+  cheeks_fade_velocity = constrain(cheeks_fade_velocity, MIN_FADE_VELOCITY, MAX_FADE_VELOCITY);
+  cheeks_fade_velocity = (cheeks_fade_velocity)/fade_velocity_divider;
+  cheeks_stop = false;
+
+}
+
+
+
+/**************************************************************************/
+/*!
+    @brief    CHEEKS FADE UP FUNCTION.
+*/
+/**************************************************************************/
+void cheeksup(void)
+{
+  cheeks_intensity_now = cheeks_intensity_now + cheeksintensity_step;
+  if(cheeks_intensity_now >= cheeks_max_intensity)
+  {
+    cheeks_intensity_now = cheeks_max_intensity;
+    cheeks_stop = true;
+    last_cheeks_R = cheeks_R;
+    last_cheeks_G = cheeks_G;
+    last_cheeks_B = cheeks_B;
+  }  
+}
+
+
+
+/**************************************************************************/
+/*!
+    @brief    CHEEKS FADE DOWN FUNCTION  
+*/
+/**************************************************************************/
+void cheeksdown(void)
+{
+  cheeks_intensity_now = cheeks_intensity_now - cheeksintensity_step;
+  if(cheeks_intensity_now <= cheeks_min_intensity)
+  {
+    cheeks_intensity_now = cheeks_min_intensity;
+    cheeks_stop = true;
+  }
+}
+
+
+
+/**************************************************************************/
+/*!
+    @brief    MAIN CHEEKS FUNCTION   
+*/
+/**************************************************************************/
+void showcheeks(void)
+{
+  if(cheeksfade == true && cheeks_stop == false){
+  if(cheeks_R !=0 || cheeks_G != 0 || cheeks_B != 0)
+  {
+    cheeksup();
+    cheeksLED.setPixelColor(LED_POSITION_LEFT,((cheeks_R*cheeks_intensity_now)/255),((cheeks_G*cheeks_intensity_now)/255),((cheeks_B*cheeks_intensity_now)/255));
+    cheeksLED.setPixelColor(LED_POSITION_RIGHT,((cheeks_R*cheeks_intensity_now)/255),((cheeks_G*cheeks_intensity_now)/255),((cheeks_B*cheeks_intensity_now)/255));
+    delay(cheeks_fade_velocity);
+  }else if(cheeks_R ==0 && cheeks_G == 0 && cheeks_B == 0)
+  {
+    cheeksdown();
+    cheeksLED.setPixelColor(LED_POSITION_LEFT,((last_cheeks_R*cheeks_intensity_now)/255),((last_cheeks_G*cheeks_intensity_now)/255),((last_cheeks_B*cheeks_intensity_now)/255));
+    cheeksLED.setPixelColor(LED_POSITION_RIGHT,((last_cheeks_R*cheeks_intensity_now)/255),((last_cheeks_G*cheeks_intensity_now)/255),((last_cheeks_B*cheeks_intensity_now)/255));
+    delay(cheeks_fade_velocity);        
+  }
+  }else if(cheeksfade == false)
+  {
+    cheeks_fade_up = false;
+    cheeks_fade_down = false;
+    cheeksLED.setPixelColor(LED_POSITION_LEFT,cheeks_R,cheeks_G,cheeks_B);
+    cheeksLED.setPixelColor(LED_POSITION_RIGHT,cheeks_R,cheeks_G,cheeks_B);
+    cheeks_stop = true;
+  }
+  cheeksLED.show();
+}
+
+
+/**************************************************************************/
+/*!
+    @brief    CONFIGURATION OF HEART LED
+    @param    r
+              Red light value.
+    @param    g
+              Red light value.
+    @param    b
+              Red light value.
+    @param    min_intensity
+              Minimum intensity the HEART can achieve.
+    @param    max_intensity
+              Maximum intensity the HEART can achieve.
+    @param    fade
+              If true, the HEART will change its value gradually. 
+    @param    fade_velocity
+              Change rate for the fade.              
+    @return   None.
+*/
+/**************************************************************************/
+void setHeart(uint8_t r, uint8_t g, uint8_t b, uint8_t min_intensity, uint8_t max_intensity, bool fade, uint8_t fade_velocity)
+{
+  heart_R = r;
+  heart_G = g;
+  heart_B = b;
+  heart_min_intensity = min_intensity;
+  heart_min_intensity = constrain(heart_min_intensity,MIN_INTENSITY_CONS_MIN,MIN_INTENSITY_CONS_MAX);
+  heart_min_intensity = map(heart_min_intensity,MIN_INTENSITY_CONS_MIN,MIN_INTENSITY_CONS_MAX,MIN_INTENSITY_MAPPED_MIN,MIN_INTENSITY_MAPPED_MAX);
+  heart_max_intensity = max_intensity;
+  heart_max_intensity = constrain(heart_max_intensity,MAX_INTENSITY_CONS_MIN,MAX_INTENSITY_CONS_MAX);
+  heart_max_intensity = map(heart_max_intensity,MAX_INTENSITY_CONS_MIN,MAX_INTENSITY_CONS_MAX,MAX_INTENSITY_MAPPED_MIN,MAX_INTENSITY_MAPPED_MAX);
+  heart_fade = fade;
+  fadeup = fade;
+  heart_fade_velocity = fade_velocity;  
+  heart_fade_velocity = constrain(heart_fade_velocity, MAX_FADE_VELOCITY, MIN_FADE_VELOCITY);
+  heart_delay = (heart_fade_velocity)/(fade_velocity_divider); 
+}
+
+
+
+/**************************************************************************/
+/*!
+    @brief    HEART BEATING UP   
+*/
+/**************************************************************************/
+void heartup(void)
+{
+  heart_intensity_now = heart_intensity_now + heartintensity_step;
+  if(heart_intensity_now >= heart_max_intensity)
+  {
+    heart_intensity_
+    now = heart_max_intensity;
+    fadedown = true;
+    fadeup = false;
+  }  
+}
+
+
+
+/**************************************************************************/
+/*!
+    @brief    HEART BEATING DOWN 
+*/
+/**************************************************************************/
+void heartdown(void){
+  heart_intensity_now = heart_intensity_now - heartintensity_step;
+  if(heart_intensity_now <= heart_min_intensity)
+  {
+    heart_intensity_now = heart_min_intensity;
+    fadedown = false;
+    fadeup = true;
+  }
+}
+
+
+
+/**************************************************************************/
+/*!
+    @brief    MAIN FUNCTION FOR HEART BEATING
+*/
+/**************************************************************************/
+void showHeart(void)
+{
+  if(heart_fade == true)
+  {
+    if(fadeup == true)
+    {
+      heartup();
+    }
+    else if(fadedown == true)
+    {
+      heartdown();
+    }
+    for(int led_position=0; led_position<heartLED.numPixels(); led_position++) 
+    {      
+      heartLED.setPixelColor(led_position,((heart_R*heart_intensity_now)/255),((heart_G*heart_intensity_now)/255),((heart_B*heart_intensity_now)/255));
+    }
+     //delay(heart_delay);
+  }
+  else if(heart_fade == false)
+  {
+    fadeup = false;
+    fadedown = false;
+    for(int led_position=0; led_position<heartLED.numPixels(); led_position++) 
+    {
+       heartLED.setPixelColor(led_position,((heart_R*heart_intensity_now)/255),((heart_G*heart_intensity_now)/255),((heart_B*heart_intensity_now)/255));
+    }
+  }
+  heartLED.show();
+}
+
+
+
+/**************************************************************************/
+/*!
+    @brief    STANDAR COLORS
+*/
+/**************************************************************************/
+void std_colors()
+{
+  //RED COLOR RGB
+  if(color_std == "red" || color_std == "RED")
+  {
+    cmd.r = 255;
+    cmd.g = 0;
+    cmd.b = 0;
+  }//GREEN COLOR RGB
+  else if(color_std == "green" || color_std == "GREEN")
+  {
+    cmd.r = 0; 
+    cmd.g = 255;
+    cmd.b = 0;
+  }//BLUE COLOR RGB
+  else if(color_std == "blue" || color_std == "BLUE")
+  {
+    cmd.r = 0;
+    cmd.g = 0; 
+    cmd.b = 255;
+  }//CYAN COLOR RGB
+  else if(color_std == "cyan" || color_std == "CYAN")
+  {
+    cmd.r = 0;
+    cmd.g = 255; 
+    cmd.b = 255;
+  }//ORANGE COLOR RGB
+  else if(color_std == "orange" || color_std == "ORANGE")
+  {
+    cmd.r = 255;
+    cmd.g = 128;
+    cmd.b = 0;
+  }//WHITE COLOR RGB
+  else if(color_std == "white" || color_std == "WHITE")
+  {
+    cmd.r = 255;
+    cmd.g = 255;
+    cmd.b = 255;
+  }//YELLOW COLOR RGB
+  else if(color_std == "yellow" || color_std == "YELLOW")
+  {
+    cmd.r = 255;
+    cmd.g = 255;
+    cmd.b = 0;
+  }//MAGENTA COLOR RGB
+  if(color_std == "magenta" || color_std == "MAGENTA")
+  {
+    cmd.r = 255;
+    cmd.g = 0;
+    cmd.b = 255;
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+//////////////////////////// SUBSCRIBER FUNCTIONS //////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+
+
+
+/**************************************************************************/
+/*!
+    @brief    LEDS subscriber function
+    @param    cmd
+              Callback message.It has the following elements:
+              - cmd.r
+              - cmd.g
+              - cmd.b
+              - cmd.color_name
+              - cmd.fade
+              - cmd.min_intensity
+              - cmd.max_intensity
+              - cmd.fade_velocity
+             ¿Por que hay 5 elementos mas que estiman los intervalos?
+    @return   None.
+*/
+/**************************************************************************/
+void leds_sub(const leds_msgs::leds_cmd& cmd)
+{
+  //nh.loginfo("Leds Callback");
+  //for(int i = 0; i < leds_vector.commands_length;i++){
+    //cmd = leds_vector.commands[i];
+    led_id = cmd.led_id;
+    color_std = cmd.color_name;
+    interval=map(constrain(cmd.fade_velocity,0,100),0,100,20,0);
+    std_colors();
+
+    if(led_id == "heart" || led_id == "HEART")
+    {
+      setHeart(cmd.r,cmd.g,cmd.b, cmd.min_intensity, cmd.max_intensity,cmd.fade, cmd.fade_velocity);
+     // digitalWrite(13, HIGH); //enable pullup resistordigitalWrite(irqpin, HIGH); //enable pullup resistor
+    }
+    else if(led_id == "cheeks" || led_id == "CHEEKS")
+    {
+      setCheeks(cmd.r,cmd.g,cmd.b, cmd.min_intensity, cmd.max_intensity, cmd.fade, cmd.fade_velocity);
+    }
+    else if(led_id == "vumeter" || led_id == "mouth" || led_id == "VUMETER" || led_id == "MOUTH")
+    {
+      mouth_r = cmd.r;
+      mouth_g = cmd.g;
+      mouth_b = cmd.b;
+    }else
+        digitalWrite(13, HIGH); //enable pullup resistordigitalWrite(irqpin, HIGH); //enable pullup resistor
+ 
+  //}
+}
+
+
+
+/**************************************************************************/
+/*!
+    @brief    Audio level metrics (software readings)
+    @param    raw_audio_level
+              Callback message.It has the following elements:
+              - raw_audio_level
+    @return   None.
+*/
+/**************************************************************************/
+void audio_level_sub(const std_msgs::UInt8& raw_audio_level)
+{
+  /*int normalized_audio_level = round((raw_audio_level.data * (LED_VUMETER_COUNT/2)) / 127 );
+  int i = LED_VUMETER_COUNT/2;
+  int j = LED_VUMETER_COUNT/2 - 1;
+  for (int count=0; count<normalized_audio_level; count++)
+  {
+    mouth.setPixelColor(i + count, mouth_r,mouth_g,mouth_b);
+    mouth.setPixelColor(j - count, mouth_r,mouth_g,mouth_b);
+  }
+  mouth.show();*/
+  valormapeado=map(constrain(raw_audio_level.data,0,127),0,127,0,LUMMAX*2);
+  mouth.setPixelColor(LEDDERCENTRO, mouth.Color(0,0,map(constrain(valormapeado,0,LUMMAX),0,LUMMAX,0,LUMMAX)));
+  mouth.setPixelColor(LEDIZQCENTRO, mouth.Color(0,0,map(constrain(valormapeado,0,LUMMAX),0,LUMMAX,0,LUMMAX)));
+  mouth.setPixelColor(LEDDERINTERIOR, mouth.Color(0,0,map(constrain(valormapeado,LUMMAX/3,LUMMAX+(LUMMAX/DIVIDER)),LUMMAX/DIVIDER,LUMMAX+(LUMMAX/DIVIDER),0,LUMMAX)));
+  mouth.setPixelColor(LEDIZQINTERIOR, mouth.Color(0,0,map(constrain(valormapeado,LUMMAX/DIVIDER,LUMMAX+(LUMMAX/DIVIDER)),LUMMAX/DIVIDER,LUMMAX+(LUMMAX/DIVIDER),0,LUMMAX)));
+  mouth.setPixelColor(LEDDEREXTERIOR, mouth.Color(0,0,map(constrain(valormapeado,2*LUMMAX/DIVIDER,LUMMAX+(2*LUMMAX/DIVIDER)),2*LUMMAX/DIVIDER,LUMMAX+(2*LUMMAX/DIVIDER),0,LUMMAX)));
+  mouth.setPixelColor(LEDIZQEXTERIOR, mouth.Color(0,0,map(constrain(valormapeado,2*LUMMAX/DIVIDER,LUMMAX+(2*LUMMAX/DIVIDER)),2*LUMMAX/DIVIDER,LUMMAX+(2*LUMMAX/DIVIDER),0,LUMMAX)));
+  mouth.setPixelColor(LEDDEREXTREMO, mouth.Color(0,0,map(constrain(valormapeado,3*LUMMAX/DIVIDER,LUMMAX+(3*LUMMAX/DIVIDER)),3*LUMMAX/DIVIDER,LUMMAX+(3*LUMMAX/DIVIDER),0,LUMMAX)));
+  mouth.setPixelColor(LEDIZQEXTREMO, mouth.Color(0,0,map(constrain(valormapeado,3*LUMMAX/DIVIDER,LUMMAX+(3*LUMMAX/DIVIDER)),3*LUMMAX/DIVIDER,LUMMAX+(3*LUMMAX/DIVIDER),0,LUMMAX)));
+  mouth.show();
+  
+}
+
+arduino_manager::sensorTouch Sensors;                                                                          ///< Declaration of the message arduino_manager/sensorTouch.
+ros::Publisher publicador("sensorTouch", &Sensors);                                                            ///< Declaration of the publisher in charge of the touch.
+ros::Subscriber<leds_msgs::leds_cmd>LED_state("leds_state", leds_sub);                                         ///< Declaration of the subscriber in charge of the LEDs (Mouth,Cheeks,Heart).
+ros::Subscriber<std_msgs::UInt8>audio_level("audioLevel", audio_level_sub);                                    ///< Declaration of the subscriber in charge of the mouth ( AudioLevel).
+
+
+
+/**************************************************************************/
+/*!
+    @brief    Check the LEDs of the mouth array, heart and cheeks 
+*/
+/**************************************************************************/
+void checkLEDs()
+{
+  uint32_t color1;
+  for (int i=0; i<LED_VUMETER_COUNT; i++)
+  { 
+    color1 = 0x500000 >> i*8;
+    for (int j=0; j<LED_VUMETER_COUNT; j++)
+    {
+      mouth.setPixelColor(j, color1);
+    }
+    mouth.show();
+    delay(100);
+  }
+  mouth.show();
+  for (int i=0; i<3; i++)
+  {
+    color1 = 0x500000 >> i*8;      
+    //Hay que cambiarlo
+    heartLED.setPixelColor(led_position, color1); 
+    cheeksLED.setPixelColor(led_position, color1);          
+    heartLED.show();
+    cheeksLED.show();
+    delay(100);
+  }
+}
+
+
+
+/**************************************************************************/
+/*!
+    @brief    Clear the mouth leds
+*/
+/**************************************************************************/
+void clearMouth()
+{
+  for (int j=0; j<LED_VUMETER_COUNT; j++)
+  {
+    mouth.setPixelColor(j, 0);
+  }
+  //mouth.show();
+}
+/**************************************************************************/
+/*!
+    @brief    Code executed one time at the beginning.  
+*/
+/**************************************************************************/
+void setup(){
+  
+  nh.initNode();
+  nh.advertise(publicador);
+  nh.subscribe(LED_state);
+  nh.subscribe(audio_level);
+  pinMode(irqpin, INPUT);
+  digitalWrite(irqpin, HIGH); //enable pullup resistor
+  Wire.begin();
+  heartLED.begin();
+  mouth.begin();
+  cheeksLED.begin();
+  heartLED.show(); // Initialize all pixels to 'off'
+  //Setting initial state of cheeks leds
+  setCheeks(cheeks_R, cheeks_G, cheeks_G, cheeks_min_intensity, cheeks_max_intensity, cheeksfade, cheeks_fade_velocity);   // DEFAULT VALUES FOR CHEEKS
+  //Setting initial state of heart leds
+  setHeart(heart_R, heart_G, heart_B, heart_min_intensity, heart_max_intensity, heart_fade, heart_fade_velocity);          // DEFAULT VALUES FOR HEART
+  heartLED.show(); // Initialize all pixels to 'off
+  mouth.show();
+  //Checking all leds state
+  checkLEDs();
+  mpr121_setup();
+  for(int i = 0;i < NUMERO_CANALES;i++)
+  {  
+    Sensors.Cn[i]=false;
+  }
+  pinMode(HEART_LED_PIN,OUTPUT);
+  pinMode(CHEEKS_LED_PIN,OUTPUT);
+  pinMode(MOUTHPIN,OUTPUT);
+  pinMode(13,OUTPUT);
+}
+/**************************************************************************/
+/*!
+    @brief    Main loop repeated constantly.  
+*/
+/**************************************************************************/
+void loop()
+{
+  unsigned long currentMillis = millis();
+  if(currentMillis - previousMillis > interval) 
+  {
+    previousMillis = currentMillis;   
+    showHeart();
+  }
+  showcheeks();
+  nh.spinOnce();
+  readTouchInputs();  
+  nh.spinOnce();
+  clearMouth();
+  nh.spinOnce();
+  delay(1);
+}
+
+
+
+/**************************************************************************/
+/*!
+    @brief    Clear the mouth leds 
+*/
+/**************************************************************************/
+void readTouchInputs()
+{
+  if(!checkInterrupt())
+  {  
+    //read the touch state from the MPR121
+    Wire.requestFrom(0x5A,2); 
+    byte LSB = Wire.read();
+    byte MSB = Wire.read();
+    uint16_t touched = ((MSB << 8) | LSB); //16bits that make up the touch states    
+    for (int i=0; i < 12; i++)
+    {  // Check what electrodes were pressed
+      if(touched & (1<<i))
+      {
+        if(touchStates[i] == 0)
+        {
+          //pin i was just touched
+//          for(int i = 0;i < NUMERO_CANALES;i++)
+//            {  
+//              Sensors.Cn[i]=false;
+//             }
+          Sensors.Cn[i]=true;
+          publicador.publish(&Sensors);  
+        }else if(touchStates[i] == 1)
+        {
+          //pin i is still being touched
+        }  
+        touchStates[i] = 1;      
+      }else
+      {
+        if(touchStates[i] == 1)
+        {
+          Sensors.Cn[i]=false;
+          publicador.publish(&Sensors);
+         //pin i is no longer being touched
+        }
+        touchStates[i] = 0;
+      }
+    }    
+  }
+}
+
+
+
+/**************************************************************************/
+/*!
+    @brief    Clear the mouth leds
+*/
+/**************************************************************************/
+void mpr121_setup(void)
+{
+  set_register(0x5A, ELE_CFG, 0x00);   
+  // Section A - Controls filtering when data is > baseline.
+  set_register(0x5A, MHD_R, 0x01);
+  set_register(0x5A, NHD_R, 0x01);
+  set_register(0x5A, NCL_R, 0x00);
+  set_register(0x5A, FDL_R, 0x00);
+  // Section B - Controls filtering when data is < baseline.
+  set_register(0x5A, MHD_F, 0x01);
+  set_register(0x5A, NHD_F, 0x01);
+  set_register(0x5A, NCL_F, 0xFF);
+  set_register(0x5A, FDL_F, 0x02);
+  // Section C - Sets touch and release thresholds for each electrode
+  set_register(0x5A, ELE0_T, TOU_THRESH);
+  set_register(0x5A, ELE0_R, REL_THRESH);
+ 
+  set_register(0x5A, ELE1_T, TOU_THRESH);
+  set_register(0x5A, ELE1_R, REL_THRESH);
+  
+  set_register(0x5A, ELE2_T, TOU_THRESH);
+  set_register(0x5A, ELE2_R, REL_THRESH);
+  
+  set_register(0x5A, ELE3_T, TOU_THRESH);
+  set_register(0x5A, ELE3_R, REL_THRESH);
+  
+  set_register(0x5A, ELE4_T, TOU_THRESH);
+  set_register(0x5A, ELE4_R, REL_THRESH);
+  
+  set_register(0x5A, ELE5_T, TOU_THRESH);
+  set_register(0x5A, ELE5_R, REL_THRESH);
+  
+  set_register(0x5A, ELE6_T, TOU_THRESH);
+  set_register(0x5A, ELE6_R, REL_THRESH);
+  
+  set_register(0x5A, ELE7_T, TOU_THRESH);
+  set_register(0x5A, ELE7_R, REL_THRESH);
+  
+  set_register(0x5A, ELE8_T, TOU_THRESH);
+  set_register(0x5A, ELE8_R, REL_THRESH);
+  
+  set_register(0x5A, ELE9_T, TOU_THRESH);
+  set_register(0x5A, ELE9_R, REL_THRESH);
+  
+  set_register(0x5A, ELE10_T, TOU_THRESH);
+  set_register(0x5A, ELE10_R, REL_THRESH);
+  
+  set_register(0x5A, ELE11_T, TOU_THRESH);
+  set_register(0x5A, ELE11_R, REL_THRESH);
+  
+  // Section D
+  // Set the Filter Configuration
+  // Set ESI2
+  set_register(0x5A, FIL_CFG, 0x04);
+  
+  // Section E
+  // Electrode Configuration
+  // Set ELE_CFG to 0x00 to return to standby mode
+  set_register(0x5A, ELE_CFG, 0x0C);  // Enables all 12 Electrodes
+    
+  // Section F
+  // Enable Auto Config and auto Reconfig
+  /*set_register(0x5A, ATO_CFG0, 0x0B);
+  set_register(0x5A, ATO_CFGU, 0xC9);  // USL = (Vdd-0.7)/vdd*256 = 0xC9 @3.3V   set_register(0x5A, ATO_CFGL, 0x82);  // LSL = 0.65*USL = 0x82 @3.3V
+  set_register(0x5A, ATO_CFGT, 0xB5);*/  // Target = 0.9*USL = 0xB5 @3.3V
+  
+  set_register(0x5A, ELE_CFG, 0x0C);
+  
+}
+
+
+
+/**************************************************************************/
+/*!
+    @brief    Clear the mouth leds   
+    @return True if ..............  , otherwise false.
+*/
+/**************************************************************************/
+boolean checkInterrupt(void)
+{
+  return digitalRead(irqpin);
+}
+
+
+
+/**************************************************************************/
+/*!
+    @brief    Clear the mouth leds
+    @param    address
+              aaa.
+    @param    r
+              bbb.
+    @param    v
+              ccc.              
+    @return   None.
+*/
+/**************************************************************************/
+void set_register(int address, unsigned char r, unsigned char v)
+{
+    Wire.beginTransmission(address);
+    Wire.write(r);
+    Wire.write(v);
+    Wire.endTransmission();
+}
