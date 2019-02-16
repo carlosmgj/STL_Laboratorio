@@ -1,3 +1,14 @@
 codigo bueno
 codigo bueno
 codigo bueno
+<<<<<<< HEAD
+=======
+codigo comun
+codigo malo
+codigo comun
+codigo comun 
+codigo malo
+cogo peor
+codigo bueno
+codigo malo
+>>>>>>> prueba-merge
